@@ -1,0 +1,26 @@
+#fund-header {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    align-items: center;
+    margin-bottom: 50px;
+}
+
+#fund-display {
+    font-size: 4em;
+}
+
+#fund-dropdown {
+    width: 10em;
+    margin-left: 20px;
+}
+
+.break {
+    flex-basis: 100%;
+    height: 0;
+}
+
+#fund-select-container {
+    display: flex;
+    align-items: center;
+}
