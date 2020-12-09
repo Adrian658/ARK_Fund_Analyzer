@@ -101,7 +101,7 @@ layout = html.Div(children=[
             html.Div("Select a new fund: "),
             dcc.Dropdown(
                 id='fund-dropdown',
-                options=[{'label': x, 'value': x} for x in FUNDS],
+                options=[{'label': x, 'value': x} for x in np.append(FUNDS, 'All')],
                 value="ARKK",
                 searchable=False
             )
@@ -196,9 +196,6 @@ def create_holdings_graph(df):
 def change_fund_header(fund):
     return fund
 
-def retrieve_holding(fundname):
-    df = holdings_store
-
 @app.callback(
     [Output(x, 'data') for x in FUND_IDS],
     [Input('refresh-holdings', 'n_clicks')]
@@ -249,8 +246,10 @@ def update_helper_div(tabname):
 )
 def change_graph(tabname, fundname, start, end, curdate, *funds):
 
+    # Initialize callback context
     cb_ctxt = dash.callback_context.triggered
     print(tabname, fundname, start, end, curdate)
+
     if not tabname or not fundname:
         return no_update, no_update
 
@@ -259,25 +258,21 @@ def change_graph(tabname, fundname, start, end, curdate, *funds):
     if cb_ctxt[0]['prop_id'] == 'graph-tabs.value' and tabname in ['trans-view', 'trans-daily']:
         raise PreventUpdate
 
-    # Create initial dataframe based on fund selection
-    if fundname == "All":
-        df = pd.concat([pd.DataFrame(x) for x in funds])
-        df = df.groupby(['ticker', 'date']).sum().reset_index()
-    else:
-        idx = FUNDS.index(fundname)
-        df = pd.DataFrame(funds[idx])
+    # Create initial dataframe based on fund selection and format
+    df = create_holdings_from_fundname(fundname, *funds)
     df['date'] = pd.to_datetime(df['date'])
     df['shares'], df['market value($)'], df['weight(%)'] = map(lambda x: x.astype('float64'), [df['shares'], df['market value($)'], df['weight(%)']])
 
+    # Check that holdings data exists
     if df.empty:
         print("Dataframe is empty")
         raise PreventUpdate
 
-    # Display the current holdings of the selected fund
+    # Display the POI holdings of the selected fund
     if tabname == "cur-holdings":
         df = df[df['date'] == curdate].sort_values('weight(%)', ascending=False)
         fig = create_holdings_graph(df)
-
+    # Display total transaction value over selected time period
     elif tabname == "trans-view":
         df = df[df['date'].between(start, end)]
 
@@ -285,7 +280,7 @@ def change_graph(tabname, fundname, start, end, curdate, *funds):
         df = df.groupby(level=0).sum().sort_values('transaction_value', ascending=False)
 
         fig = create_transaction_analyzer_plot(df)
-
+    # Display transactions for previous 7 trading days
     elif tabname == "trans-daily":
         dates = sorted(df['date'].unique(), reverse=True)[:8]
         df = df[df['date'].isin(dates)]
@@ -300,116 +295,153 @@ def change_graph(tabname, fundname, start, end, curdate, *funds):
 
 # TRIGGER: When a ticker on the main graph is clicked on
 # OUTPUTS: Historical data graph is updated with data
-#@app.callback(
-#    [Output('historical-data-graph-ark', 'figure'), Output('historical-data-wrap', 'style')],
-#    [Input('main-graph', 'clickData')],
-#    [State('fund-name', 'children')]
-#)
-def create_historical_plot(clickData, fundname):
-    print(clickData, fundname)
+@app.callback(
+    [Output('historical-data-graph-ark', 'figure'), Output('historical-data-wrap', 'style')],
+    [Input('main-graph', 'clickData')],
+    [State('fund-name', 'children'), *[State(x, 'data') for x in FUND_IDS]]
+)
+def create_historical_plot(clickData, fundname, *funds):
 
     if not clickData:
         return no_update, no_update
+    print(clickData, fundname)
 
-    if fundname == 'All':
-        df = pd.concat([x for x in TRANSACTION_LOG.values()])
-        df = df.groupby(['ticker', 'date']).sum().reset_index()
-    else:
-        df = TRANSACTION_LOG[fundname].copy(deep=True)
+    # Create initial dataframe based on fund selection
+    df = create_holdings_from_fundname(fundname, *funds)
 
+    # Filter only the selected ticker
     ticker = clickData['points'][0]['x']
+    df = df[df['ticker'] == ticker]
 
-    historical_data = get_historical_data(ticker, SESSION, start_date="2020-01-01")
+    # Create transaction log for selected company
+    start = time.time()
+    df = create_transaction_log(df)
+    print("Transaction log took %s seconds to create" % (time.time()- start))
 
-    historical_price_fig = impose_event_on_historical(df, ticker, historical_data=historical_data)
+    # Ensure columns are appropriately typed
+    df['date'] = pd.to_datetime(df['date'])
+    df['transaction_value'] = df['transaction_value'].astype('int64')
+    df['shares'] = df['shares'].astype('int64')
 
-    recent_df = historical_data.loc[pd.to_datetime(dt.date.today() - dt.timedelta(days=30)):]
-    plot_range = [recent_df['Close'].min(), recent_df['Close'].max()]
-    range_span = plot_range[1] - plot_range[0]
-    plot_range[0] = plot_range[0] - .2 * range_span
-    plot_range[1] = plot_range[1] + .2 * range_span
-    historical_price_fig.update_yaxes(
-        range=plot_range
-    )
+    # Retrieve the historical data for stocl
+    historical_data = get_historical_data(ticker, session=SESSION, start_date="2020-01-01")
 
-    #historical_price_fig.update_layout(hovermode='x unified')
+    # Calculate the price and direction of transactions
+    df['price'] = historical_data.loc[df['date']]['Close'].values
+    df['direction'] = ['buy' if x else 'sell' for x in (df['shares'] > 0)]
+
+    # Create graph that overlaps transactions with historical data
+    historical_price_fig = impose_event_on_historical(df, historical_data=historical_data, initialize_with_zoom=90)
 
     return historical_price_fig, {'display': 'block'}
 
+def create_holdings_from_fundname(fundname, *funds):
+
+    # Create dataframe based on fund selection
+    if fundname == "All":
+        df = pd.concat([pd.DataFrame(x) for x in funds])
+        df = df.groupby(['company', 'ticker', 'date']).sum().reset_index()
+        df['weight(%)'] = df['weight(%)'] / len(funds)
+    else:
+        idx = FUNDS.index(fundname)
+        df = pd.DataFrame(funds[idx])
+
+    return df
 
 
-def get_historical_data(ticker, session=None, start_date="2010-01-01"):
-    # Query for stock information
-    company = yf.Ticker(ticker)
 
-    if not session:
-        session = requests_cache.CachedSession(cache_name='cache', backend='sqlite', expire_after=dt.timedelta(days=1))
+########                                    EVENT OVERLAY ON HISTORICAL DATA                                     ########
 
-    historical_data = pdr.get_data_yahoo(ticker, start=start_date, end=dt.datetime.now().strftime('%Y-%m-%d'), session=session)
-    historical_data.index = pd.to_datetime(historical_data.index)
+def impose_event_on_historical(events, historical_data, initialize_with_zoom=0):
 
-    return historical_data
+    # Scale the transaction value to create relative values that will be used for marker sizing in plotting functions
+    # TODO: Update this so that bubbles have a minimum size
+    max_size = events['transaction_value'].max()
+    transaction_value_abs = events['transaction_value'].abs()
+    transaction_value_abs = transaction_value_abs / (max_size/30)
 
-def impose_event_on_historical(df, ticker, session=None, trans_val_div=1000, 
-                               date_col='date', price_col='price', shares_col='shares', trans_type_col='type_colored',
-                               recent_range=True, historical_data=None):
-    if historical_data is None:
-        historical_data = get_historical_data(ticker, session, start_date="2020-01-01")
+    # Map transaction direction to marker color
+    direction_mapper = ['green' if x == 'buy' else 'red' for x in events['direction']]
 
-    df = df[df['ticker'] == ticker]
-    df['transaction_value'] = (df['transaction_value'] / trans_val_div).astype('int64')
-    max_size = df.describe().loc['75%']['transaction_value']
+    # Format the transaction values and shares as more interpretable strings
+    transaction_value_format = (events['transaction_value']/1000).round(0).astype('int64').apply(lambda x: "${:,}".format(x))
+    shares_format = events['shares'].apply(lambda x: "{:,}".format(x))
 
-    if price_col not in df.columns:
-        df[price_col] = historical_data.loc[df[date_col]]['Close'].values
-    if trans_type_col not in df.columns:
-        df[trans_type_col] = ['green' if x else 'red' for x in (df[shares_col] > 0)]
-    transaction_value_abs = df['transaction_value'].abs()
-
-    transaction_value_abs[transaction_value_abs > max_size] = max_size
-    transaction_value_abs = transaction_value_abs / (max_size/50)
-    transaction_value_abs[transaction_value_abs < 10] = 10
-
-    trans_val_unit = ''
-    if trans_val_div == 1000:
-        trans_val_unit = 'k'
-
+    # Plotting
     historical_price_fig = go.Figure(layout={'height': 600})
     historical_price_fig.add_trace(go.Scatter(
                                             x=historical_data.index, 
                                             y=historical_data['Close'],
                                             hovertemplate =
-                                            '<b>Date</b>: %{x}'+
-                                            '<br><b>Close</b>: $%{y:.0f}<br>',
-                                            mode='lines', name="Price"))
+                                            '<b>Stock Price</b>'+
+                                            '<br></br>'+
+                                            '<i>Date</i>:   %{x}'+
+                                            '<br><i>Close</i>: $%{y:.2f}</br>'+
+                                            '<extra></extra>',
+                                            mode='lines', name="Stock Price"))
     historical_price_fig.add_trace(go.Scatter(
-                                            x=pd.DatetimeIndex(df[date_col]).date, 
-                                            y=df[price_col],
-                                            mode='markers', name="Recommendations",
-                                            text=df['transaction_value'],
-                                            customdata=df[shares_col],
+                                            x=events['date'], 
+                                            y=events['price'],
+                                            mode='markers', name="Transaction",
+                                            text=transaction_value_format,
+                                            customdata=shares_format,
                                             hovertemplate =
-                                            '<b>Date</b>: %{x}'+
-                                            '<br><b>Transaction value</b>: $%{text:.2f}' + trans_val_unit + '<br>'+
-                                            '<b>Shares: %{customdata}</b>',
-                                            marker_color=df[trans_type_col],
+                                            '<b>Transaction</b>'+
+                                            '<br></br>'+
+                                            '<i>Date</i>:                      %{x}'+
+                                            '<i><br>Transaction value</i>: %{text}K<br>'+
+                                            '<i>Shares</i>:                  %{customdata}'+
+                                            '<extra></extra>',
+                                            marker_color=direction_mapper,
                                             marker=dict(size=transaction_value_abs)))
     
-    if recent_range:
+    # Initialize the graph with a zoom in on the previous 'initialize_with_zoom' days
+    if initialize_with_zoom:
+        recent_df = historical_data.loc[pd.to_datetime(dt.date.today() - dt.timedelta(days=initialize_with_zoom)):]
+        plot_range = [recent_df['Close'].min(), recent_df['Close'].max()]
+        range_span = plot_range[1] - plot_range[0]
+        plot_range[0] = plot_range[0] - .2 * range_span
+        plot_range[1] = plot_range[1] + .2 * range_span
+        historical_price_fig.update_yaxes(
+            range=plot_range
+        )
         historical_price_fig.update_xaxes(
-            range=[dt.date.today() - dt.timedelta(days=30), dt.date.today()]
+            range=[dt.date.today() - dt.timedelta(days=initialize_with_zoom), dt.date.today()]
         )
 
+    # Hide specified dates on x axis
+    # Configure x axis spike
     historical_price_fig.update_xaxes(
         rangebreaks=[
-            dict(bounds=["sat", "mon"]), #hide weekends
+            dict(bounds=["sat", "mon"]), # hide weekends
             dict(values=["2020-12-25", "2020-01-01"])  # hide Christmas and New Year's
-        ]
+        ],
+        showspikes=True, spikethickness=1, spikecolor='black', spikesnap='cursor', spikemode='across'
     )
+
+    # Configure hover options
+    historical_price_fig.update_layout(hovermode='x', spikedistance=100000, hoverdistance=2)
 
     return historical_price_fig
 
+def get_historical_data(ticker, session=None, start_date="2010-01-01"):
 
+    # Create ticker object
+    company = yf.Ticker(ticker)
+
+    # Create a new cached session if one does not exist
+    if not session:
+        session = requests_cache.CachedSession(cache_name='cache', backend='sqlite', expire_after=dt.timedelta(days=1))
+
+    # Request historical data from yahoo finance
+    historical_data = pdr.get_data_yahoo(ticker, start=start_date, end=dt.datetime.now().strftime('%Y-%m-%d'), session=session)
+    historical_data.index = pd.to_datetime(historical_data.index)
+
+    return historical_data
+
+
+
+########                                    TRANSACTION LOG CREATION                                     ########
 
 def create_transaction_log(df):
 
@@ -436,6 +468,22 @@ def unwrap_transaction_log_args(data):
 
 ### Create a transaction log between two holding periods ###
 def create_transaction_log_single(prev, cur):
+    """
+    Create a log of transactions given two dataframes containing daily holdings information
+
+    Returns a log detailing each transaction made of the form
+        [ticker shares transaction_value date company]
+
+    Note: Direction of difference is cur-prev, so cur should hold most recent holdings information
+
+    Parameters
+    ----------
+    prev : dataframe containing information on the initial holdings
+    cur : dataframe containing information on the updated holdings
+    """
+
+    if prev.empty or cur.empty:
+        return pd.DataFrame()
     
     def format_df(df):
         df = df.copy()
@@ -449,7 +497,7 @@ def create_transaction_log_single(prev, cur):
     prev = format_df(prev)
     cur = format_df(cur)
     joined = prev.join(cur, how='outer', lsuffix='_prev', rsuffix='_cur')
-    #return joined
+
     # Compute transaction information from joined df
     transaction_log = pd.DataFrame()
     transaction_log['shares'] = joined['shares_cur'] - joined['shares_prev']
