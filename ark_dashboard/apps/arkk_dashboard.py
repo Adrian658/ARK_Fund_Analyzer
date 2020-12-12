@@ -3,6 +3,7 @@ import warnings
 import dash
 import dash_core_components as dcc
 import dash_html_components as html
+import dash_bootstrap_components as dbc
 from dash.dependencies import Input, Output, State
 from dash.dash import no_update
 from dash.exceptions import PreventUpdate
@@ -35,7 +36,7 @@ from app import app
 ##### GLOBALS #####
 
 # Create new cached session
-SESSION = requests_cache.CachedSession(cache_name='cache', backend='sqlite', expire_after=dt.timedelta(days=1))
+SESSION = requests_cache.CachedSession(cache_name='cache', backend='sqlite', expire_after=dt.timedelta(hours=1))
 
 TAB_LABELS = {
     "summary": {"alias": "Summary"},
@@ -107,6 +108,24 @@ layout = html.Div(children=[
             )
         ])
     ]),
+    dbc.Button("Open modal", id="open-modal"),
+    dbc.Modal(
+        [
+            dbc.ModalHeader("No stock selected", id="selected-stock-name"),
+            dcc.Graph(
+                id='historical-data-graph-ark',
+                config={'modeBarButtonsToRemove': 
+                    ['toImage', 'zoomIn2d', 'zoomOut2d', 'hoverClosestCartesian', 'resetScale2d', 'toggleSpikelines', 'hoverCompareCartesian', 'hoverClosestCartesian']
+                }
+            ),
+            dbc.ModalBody(id="selected-stock-content"),
+            dbc.ModalFooter(
+                dbc.Button("Close", id="close-modal", className="ml-auto")
+            ),
+        ],
+        id="stock-analyzer-modal",
+        size='xl'
+    ),
     tabs,
     html.Div(id='main-graph-container', children=[
         html.Div(id='main-div', children=[
@@ -116,12 +135,9 @@ layout = html.Div(children=[
         html.Button('Refresh', id='refresh-holdings'),
         dcc.Graph(id='main-graph')
     ]),
-    html.Div(id='historical-data-wrap', children=[
-        html.Div(children='Historical price graph'),
-        dcc.Graph(id='historical-data-graph-ark')
-    ], style={'display': 'none'}),
     *holdings_store
 ])
+
         
 
 
@@ -194,6 +210,8 @@ def create_holdings_graph(df):
     [Input('fund-dropdown', 'value')]
 )
 def change_fund_header(fund):
+    if not fund:
+        return no_update
     return fund
 
 @app.callback(
@@ -293,17 +311,30 @@ def change_graph(tabname, fundname, start, end, curdate, *funds):
 
     return fig
 
+@app.callback(
+    Output("stock-analyzer-modal", "is_open"),
+    [Input("open-modal", "n_clicks"), Input("close-modal", "n_clicks")],
+    [State("stock-analyzer-modal", "is_open")],
+)
+def toggle_stock_analyzer(n1, n2, is_open):
+    print(n1, n2, is_open)
+    if n1 or n2:
+        return not is_open
+    return is_open
+
 # TRIGGER: When a ticker on the main graph is clicked on
 # OUTPUTS: Historical data graph is updated with data
 @app.callback(
-    [Output('historical-data-graph-ark', 'figure'), Output('historical-data-wrap', 'style')],
+    [Output('historical-data-graph-ark', 'figure'), Output('selected-stock-name', 'children'), Output('open-modal', 'n_clicks')],#Output('historical-data-wrap', 'style')],
     [Input('main-graph', 'clickData')],
-    [State('fund-name', 'children'), *[State(x, 'data') for x in FUND_IDS]]
+    [State('fund-name', 'children'), State('open-modal', 'n_clicks'), *[State(x, 'data') for x in FUND_IDS]]
 )
-def create_historical_plot(clickData, fundname, *funds):
+def create_historical_plot(clickData, fundname, modalclicks, *funds):
 
     if not clickData:
-        return no_update, no_update
+        raise PreventUpdate
+    if not modalclicks:
+        modalclicks = 0
     print(clickData, fundname)
 
     # Create initial dataframe based on fund selection
@@ -311,29 +342,35 @@ def create_historical_plot(clickData, fundname, *funds):
 
     # Filter only the selected ticker
     ticker = clickData['points'][0]['x']
-    df = df[df['ticker'] == ticker]
+    #df = df[df['ticker'] == ticker]
 
     # Create transaction log for selected company
     start = time.time()
     df = create_transaction_log(df)
+    df = df.loc[ticker]
     print("Transaction log took %s seconds to create" % (time.time()- start))
+
+    # Cast as df if a single transaction is found
+    if type(df) == pd.core.series.Series:
+        df = df.to_frame().T
 
     # Ensure columns are appropriately typed
     df['date'] = pd.to_datetime(df['date'])
     df['transaction_value'] = df['transaction_value'].astype('int64')
     df['shares'] = df['shares'].astype('int64')
 
-    # Retrieve the historical data for stocl
+    # Retrieve the historical data for stock
     historical_data = get_historical_data(ticker, session=SESSION, start_date="2020-01-01")
 
     # Calculate the price and direction of transactions
     df['price'] = historical_data.loc[df['date']]['Close'].values
-    df['direction'] = ['buy' if x else 'sell' for x in (df['shares'] > 0)]
+    df['direction'] = ['buy' if x else 'sell' for x in df['shares'] > 0]
 
     # Create graph that overlaps transactions with historical data
     historical_price_fig = impose_event_on_historical(df, historical_data=historical_data, initialize_with_zoom=90)
 
-    return historical_price_fig, {'display': 'block'}
+    return historical_price_fig, df['company'].iloc[0], modalclicks+1 #{'display': 'block'}
+
 
 def create_holdings_from_fundname(fundname, *funds):
 
@@ -443,7 +480,7 @@ def get_historical_data(ticker, session=None, start_date="2010-01-01"):
 
 ########                                    TRANSACTION LOG CREATION                                     ########
 
-def create_transaction_log(df):
+def create_transaction_log(df, max_processes=5):
 
     # Compile matrix of dates that serve as bounds for each transaction
     dates = sorted(df['date'].unique())
@@ -456,7 +493,7 @@ def create_transaction_log(df):
     # Create a transaction log for each of previously established time frames and compile into one master log
     start = time.time()
     print("Creating transaction log")
-    with ProcessPoolExecutor(max_workers=1) as executor:
+    with ProcessPoolExecutor(max_workers=max_processes) as executor:
         logs = executor.map(unwrap_transaction_log_args, [(df[df['date']==x], df[df['date']==y]) for x,y in date_tuples])
     df = pd.concat(list(logs))
     print("Finished creating transaction log: %s seconds" % (time.time()-start))
@@ -482,8 +519,10 @@ def create_transaction_log_single(prev, cur):
     cur : dataframe containing information on the updated holdings
     """
 
-    if prev.empty or cur.empty:
+    if cur.empty:
         return pd.DataFrame()
+    if prev.empty:
+        return 
     
     def format_df(df):
         df = df.copy()

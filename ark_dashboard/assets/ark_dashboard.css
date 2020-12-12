@@ -24,3 +24,9 @@
     display: flex;
     align-items: center;
 }
+
+/*@media (min-width: 576px) {
+    .modal-dialog {
+        max-width: 1200px;
+    }
+}*/

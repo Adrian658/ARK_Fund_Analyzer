@@ -6,3 +6,4 @@ ark.env
 ark.log
 *__pycache__.py
 boto3/
+ark_dashboard/cache.sqlite
