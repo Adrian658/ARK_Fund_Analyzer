@@ -87,6 +87,32 @@ def date_picker(display=True, start=dt.date.today()):
     )
     return date_picker
 
+def ticker_selector(df, display=True):
+    if display:
+        display = 'block'
+    else:
+        display = 'none'
+
+    if not df.empty:
+        df = df[['ticker', 'company']].sort_values('ticker').drop_duplicates()
+    
+    dropdown = dcc.Dropdown(
+        id='ticker-selector',
+        options=[
+            {
+                'label': row['ticker'], 
+                'value': row['ticker'], 
+                'title': row['company']
+            } for idx, row in df.dropna().iterrows()
+        ],
+        value=[],
+        multi=True,
+        placeholder='Filter for your favorite stocks...',
+        style={'display': display}
+    )
+
+    return dropdown
+
 tabs = dcc.Tabs(id='graph-tabs', value='cur-holdings', children=[dcc.Tab(label=y['alias'], value=x) for x, y in TAB_LABELS.items()])
 
 # Main layout of page
@@ -128,9 +154,12 @@ layout = html.Div(children=[
     ),
     tabs,
     html.Div(id='main-graph-container', children=[
-        html.Div(id='main-div', children=[
+        html.Div(id='calendars-div', children=[
             date_range_picker(False),
-            date_picker(False)
+            date_picker(False),
+        ]),
+        html.Div(id='ticker-selector-div', children=[
+            ticker_selector(pd.DataFrame())
         ]),
         html.Button('Refresh', id='refresh-holdings'),
         dcc.Graph(id='main-graph')
@@ -175,7 +204,7 @@ def create_transaction_analyzer_plot(df):
     
     fig = go.Figure(layout={'height': 600})
     fig.add_trace(go.Scatter(
-                            x=df.index, 
+                            x=df['ticker'], 
                             y=df['transaction_value'],
                             text=df['shares'],
                             mode='markers', name="All Transactions",
@@ -238,10 +267,10 @@ def update_holdings_data(nclicks):
     return fundata
 
 @app.callback(
-    Output('main-div', 'children'),
+    Output('calendars-div', 'children'),
     [Input('graph-tabs', 'value')]
 )
-def update_helper_div(tabname):
+def update_calendar_div(tabname):
 
     if tabname == "cur-holdings":
         return date_range_picker(False), date_picker(True)
@@ -251,29 +280,28 @@ def update_helper_div(tabname):
         return date_range_picker(False), date_picker(False)
     else:
         return no_update
-    
-
 
 # TRIGGER: Tab selection is changed, Fund display name is changed
 # OUTPUTS: Content of main container / graph
 @app.callback(
-    Output('main-graph', 'figure'),
+    [Output('main-graph', 'figure'), Output('ticker-selector-div', 'children')],
     [Input('graph-tabs', 'value'), Input('fund-name', 'children'), 
      Input('date-range-picker', 'start_date'), Input('date-range-picker', 'end_date'), 
-     Input('date-picker', 'date'), *[Input(x, 'data') for x in FUND_IDS]]
+     Input('date-picker', 'date'), Input('ticker-selector', 'value'), *[Input(x, 'data') for x in FUND_IDS]]
 )
-def change_graph(tabname, fundname, start, end, curdate, *funds):
+def change_graph(tabname, fundname, start, end, curdate, selectorvalues, *funds):
 
     # Initialize callback context
     cb_ctxt = dash.callback_context.triggered
-    print(tabname, fundname, start, end, curdate)
+    trigger = cb_ctxt[0]['prop_id']
+    print("Callback params: ", tabname, fundname, start, end, curdate, selectorvalues)
 
     if not tabname or not fundname:
-        return no_update, no_update
+        raise PreventUpdate
 
     # Prevent update if callback trigger is a tab change to prevent duplicate trigger activations
     #   This trigger also triggers another callback that will in turn trigger this callback again
-    if cb_ctxt[0]['prop_id'] == 'graph-tabs.value' and tabname in ['trans-view', 'trans-daily']:
+    if trigger == 'graph-tabs.value' and tabname in ['trans-view', 'trans-daily']:
         raise PreventUpdate
 
     # Create initial dataframe based on fund selection and format
@@ -286,8 +314,14 @@ def change_graph(tabname, fundname, start, end, curdate, *funds):
         print("Dataframe is empty")
         raise PreventUpdate
 
+    display_ticker_selector = True
+    # If the trigger event was a modification of the ticker selection dropdown, filter df accordingly
+    if trigger == 'ticker-selector.value' and len(selectorvalues) != 0:
+        df = df[df['ticker'].isin(selectorvalues)]
+
     # Display the POI holdings of the selected fund
     if tabname == "cur-holdings":
+        display_ticker_selector = False # This tab does not want to display the ticker selector
         df = df[df['date'] == curdate].sort_values('weight(%)', ascending=False)
         fig = create_holdings_graph(df)
     # Display total transaction value over selected time period
@@ -295,7 +329,8 @@ def change_graph(tabname, fundname, start, end, curdate, *funds):
         df = df[df['date'].between(start, end)]
 
         df = create_transaction_log(df)
-        df = df.groupby(level=0).sum().sort_values('transaction_value', ascending=False)
+        df = df.reset_index().groupby(['ticker', 'company']).sum().reset_index()
+        df = df.sort_values('transaction_value', ascending=False)
 
         fig = create_transaction_analyzer_plot(df)
     # Display transactions for previous 7 trading days
@@ -304,20 +339,25 @@ def change_graph(tabname, fundname, start, end, curdate, *funds):
         df = df[df['date'].isin(dates)]
 
         df = create_transaction_log(df)
-        df = df.reset_index().groupby(['ticker', 'date']).sum().reset_index()
+        df = df.reset_index().groupby(['ticker', 'company', 'date']).sum().reset_index()
         df = df.sort_values('transaction_value', ascending=False)
 
         fig = create_daily_transactions_plots(df)
 
-    return fig
+    # If the trigger event was a modification of the ticker selection dropdown, do not update the ticker selection dropdown
+    if trigger == 'ticker-selector.value':
+        return fig, no_update
+    else:
+        return fig, ticker_selector(df)
 
+# TRIGGER: When the open or close modal button is clicked on
+# OUTPUTS: Opening or closing the modal
 @app.callback(
     Output("stock-analyzer-modal", "is_open"),
     [Input("open-modal", "n_clicks"), Input("close-modal", "n_clicks")],
     [State("stock-analyzer-modal", "is_open")],
 )
 def toggle_stock_analyzer(n1, n2, is_open):
-    print(n1, n2, is_open)
     if n1 or n2:
         return not is_open
     return is_open
@@ -369,7 +409,7 @@ def create_historical_plot(clickData, fundname, modalclicks, *funds):
     # Create graph that overlaps transactions with historical data
     historical_price_fig = impose_event_on_historical(df, historical_data=historical_data, initialize_with_zoom=90)
 
-    return historical_price_fig, df['company'].iloc[0], modalclicks+1 #{'display': 'block'}
+    return historical_price_fig, df['company'].iloc[0], modalclicks+1
 
 
 def create_holdings_from_fundname(fundname, *funds):
@@ -393,8 +433,8 @@ def impose_event_on_historical(events, historical_data, initialize_with_zoom=0):
 
     # Scale the transaction value to create relative values that will be used for marker sizing in plotting functions
     # TODO: Update this so that bubbles have a minimum size
-    max_size = events['transaction_value'].max()
     transaction_value_abs = events['transaction_value'].abs()
+    max_size = transaction_value_abs.max()
     transaction_value_abs = transaction_value_abs / (max_size/30)
 
     # Map transaction direction to marker color

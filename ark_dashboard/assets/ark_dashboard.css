@@ -25,6 +25,11 @@
     align-items: center;
 }
 
+#ticker-selector-div{
+    width: 80%;
+    margin: auto;
+}
+
 /*@media (min-width: 576px) {
     .modal-dialog {
         max-width: 1200px;
