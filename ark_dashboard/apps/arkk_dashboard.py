@@ -107,7 +107,7 @@ def ticker_selector(df, display=True):
         ],
         value=[],
         multi=True,
-        placeholder='Filter for your favorite stocks...',
+        placeholder='Find your favorite stocks...',
         style={'display': display}
     )
 
@@ -117,6 +117,13 @@ tabs = dcc.Tabs(id='graph-tabs', value='cur-holdings', children=[dcc.Tab(label=y
 
 # Main layout of page
 layout = html.Div(children=[
+    html.Button(id='refresh-holdings', children=[
+        html.I(className="fas fa-sync-alt")
+    ]),
+    dbc.Tooltip(
+        "Refresh data",
+        target="refresh-holdings"
+    ),
     html.Div(id="fund-header", children=[
         html.Div(id="fund-display", children=[
             html.Span("You are viewing the "),
@@ -138,12 +145,14 @@ layout = html.Div(children=[
     dbc.Modal(
         [
             dbc.ModalHeader("No stock selected", id="selected-stock-name"),
+            dcc.Store(id='selected-stock-ticker'),
+            dcc.Loading(
             dcc.Graph(
                 id='historical-data-graph-ark',
                 config={'modeBarButtonsToRemove': 
                     ['toImage', 'zoomIn2d', 'zoomOut2d', 'hoverClosestCartesian', 'resetScale2d', 'toggleSpikelines', 'hoverCompareCartesian', 'hoverClosestCartesian']
                 }
-            ),
+            )),
             dbc.ModalBody(id="selected-stock-content"),
             dbc.ModalFooter(
                 dbc.Button("Close", id="close-modal", className="ml-auto")
@@ -154,15 +163,18 @@ layout = html.Div(children=[
     ),
     tabs,
     html.Div(id='main-graph-container', children=[
-        html.Div(id='calendars-div', children=[
-            date_range_picker(False),
-            date_picker(False),
+        html.Div(id='main-options-container', children=[
+            html.Span(id='calendars-div', children=[
+                date_range_picker(False),
+                date_picker(False),
+            ]),
+            html.Span(id='ticker-selector-div', children=[
+                ticker_selector(pd.DataFrame())
+            ])
         ]),
-        html.Div(id='ticker-selector-div', children=[
-            ticker_selector(pd.DataFrame())
-        ]),
-        html.Button('Refresh', id='refresh-holdings'),
-        dcc.Graph(id='main-graph')
+        dcc.Loading(type="cube", children=[
+            dcc.Graph(id='main-graph')
+        ])
     ]),
     *holdings_store
 ])
@@ -177,6 +189,7 @@ def create_daily_transactions_plots(df):
 
     fig = make_subplots(
         rows=4, cols=2,
+        subplot_titles=[str(x) for x in range(min(df.shape[0], 7))],
         column_widths=[0.5, 0.5],
         row_heights=[0.5, 0.5, 0.5, 0.5],
         specs=[[{"colspan": 2}, None],
@@ -185,10 +198,12 @@ def create_daily_transactions_plots(df):
             [{},             {}]]
     )
     fig.update_xaxes(tickangle=45)
-    fig.update_layout(height=1000)
+    fig.update_layout(height=1000, showlegend=False)
 
+    iternum = 0
     for date, idx in zip(sorted(df['date'].unique(), reverse=True)[:7], [(1,1), (2,1), (2,2), (3,1), (3,2), (4,1), (4,2)]):
         temp = df[df['date'] == date]
+        fig.layout.annotations[iternum]['text'] = pd.to_datetime(str(date)).strftime("%A, %b %d")
         fig.add_trace(go.Scatter(
             x=temp['ticker'], 
             y=temp['transaction_value'],
@@ -196,6 +211,7 @@ def create_daily_transactions_plots(df):
             mode='markers', name=str(date)),
             row=idx[0], col=idx[1]
         )
+        iternum+=1
 
     return fig
 
@@ -224,6 +240,15 @@ def create_holdings_graph(df):
                             mode='markers', name="All Transactions",
                             marker=dict(size=10)))
     fig.update_xaxes(tickangle=45)
+    fig.update_layout(
+        title={
+            'text': "Holdings",
+            'x': 0.5,
+            'xanchor': "center"
+        },
+        xaxis_title="Company",
+        yaxis_title="Portfolio Allocation (%)",
+    )
 
     return fig
 
@@ -285,7 +310,7 @@ def update_calendar_div(tabname):
 # OUTPUTS: Content of main container / graph
 @app.callback(
     [Output('main-graph', 'figure'), Output('ticker-selector-div', 'children')],
-    [Input('graph-tabs', 'value'), Input('fund-name', 'children'), 
+    [Input('graph-tabs', 'value'), Input('fund-name', 'children'),
      Input('date-range-picker', 'start_date'), Input('date-range-picker', 'end_date'), 
      Input('date-picker', 'date'), Input('ticker-selector', 'value'), *[Input(x, 'data') for x in FUND_IDS]]
 )
@@ -308,6 +333,10 @@ def change_graph(tabname, fundname, start, end, curdate, selectorvalues, *funds)
     df = create_holdings_from_fundname(fundname, *funds)
     df['date'] = pd.to_datetime(df['date'])
     df['shares'], df['market value($)'], df['weight(%)'] = map(lambda x: x.astype('float64'), [df['shares'], df['market value($)'], df['weight(%)']])
+
+    # Sleep so that loading animation can be seen :)
+    import time
+    time.sleep(1)
 
     # Check that holdings data exists
     if df.empty:
@@ -337,6 +366,13 @@ def change_graph(tabname, fundname, start, end, curdate, selectorvalues, *funds)
     elif tabname == "trans-daily":
         dates = sorted(df['date'].unique(), reverse=True)[:8]
         df = df[df['date'].isin(dates)]
+        print(dates)
+
+        # Create a pseudo record of a holdings period indicating 0 shares held before initial purchase so transaction log can be created successfuly
+        if len(dates) < 7:
+            for idx, row in enumerate(df.drop_duplicates('ticker').itertuples(index=False)):
+                df.loc[idx*-1] = [row.company, dates[-1]-np.timedelta64(1, 'D'), row.fund, row.ticker, row.cusip, 0, 0, 0]
+            df = df.sort_index()
 
         df = create_transaction_log(df)
         df = df.reset_index().groupby(['ticker', 'company', 'date']).sum().reset_index()
@@ -362,26 +398,43 @@ def toggle_stock_analyzer(n1, n2, is_open):
         return not is_open
     return is_open
 
-# TRIGGER: When a ticker on the main graph is clicked on
-# OUTPUTS: Historical data graph is updated with data
+# TRIGGER: When a data point on the main graph is selected
+# OUTPUTS: Update the selected ticker dcc.Store and open the stock analyzer modal by simulating a click
 @app.callback(
-    [Output('historical-data-graph-ark', 'figure'), Output('selected-stock-name', 'children'), Output('open-modal', 'n_clicks')],#Output('historical-data-wrap', 'style')],
+    [Output('open-modal', 'n_clicks'), Output('selected-stock-ticker', 'data')],
     [Input('main-graph', 'clickData')],
-    [State('fund-name', 'children'), State('open-modal', 'n_clicks'), *[State(x, 'data') for x in FUND_IDS]]
+    [State('open-modal', 'n_clicks')]
 )
-def create_historical_plot(clickData, fundname, modalclicks, *funds):
+def open_stock_analyzer(clickData, modalclicks):
 
     if not clickData:
         raise PreventUpdate
     if not modalclicks:
         modalclicks = 0
-    print(clickData, fundname)
+
+    ticker = clickData['points'][0]['x']
+
+    return modalclicks+1, ticker
+
+# TRIGGER: When the selected stock ticker is updated
+# OUTPUTS: Stock analyzer modal is updated with a new historical data graph and other stock metadata
+@app.callback(
+    [Output('historical-data-graph-ark', 'figure'), Output('selected-stock-name', 'children')],
+    [Input('selected-stock-ticker', 'data')],
+    [State('fund-name', 'children'), State('open-modal', 'n_clicks'), *[State(x, 'data') for x in FUND_IDS]]
+)
+def create_historical_plot(ticker, fundname, modalclicks, *funds):
+
+    if not ticker:
+        raise PreventUpdate
+    if not modalclicks:
+        modalclicks = 0
+    print(ticker, fundname)
 
     # Create initial dataframe based on fund selection
     df = create_holdings_from_fundname(fundname, *funds)
 
     # Filter only the selected ticker
-    ticker = clickData['points'][0]['x']
     #df = df[df['ticker'] == ticker]
 
     # Create transaction log for selected company
@@ -409,7 +462,7 @@ def create_historical_plot(clickData, fundname, modalclicks, *funds):
     # Create graph that overlaps transactions with historical data
     historical_price_fig = impose_event_on_historical(df, historical_data=historical_data, initialize_with_zoom=90)
 
-    return historical_price_fig, df['company'].iloc[0], modalclicks+1
+    return historical_price_fig, df['company'].iloc[0]
 
 
 def create_holdings_from_fundname(fundname, *funds):

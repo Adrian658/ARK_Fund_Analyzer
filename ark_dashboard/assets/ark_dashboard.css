@@ -1,9 +1,29 @@
+#refresh-holdings {
+    position: fixed;
+    background-color: #8e6cdf;
+    border-radius: 100px;
+    width: 50px;
+    height: 50px;
+    color: white;
+    border: none;
+    margin: 20px;
+    z-index: 1000;
+    transition: .4s;
+    box-shadow: 0 4px 8px 0 rgba(0, 0, 0, 0.2), 0 6px 20px 0 rgba(0, 0, 0, 0.19);
+    right: 0;
+}
+
+#refresh-holdings:hover {
+    background-color: #7857c6;
+}
+
 #fund-header {
     display: flex;
     flex-wrap: wrap;
     justify-content: center;
     align-items: center;
     margin-bottom: 50px;
+    border: none;
 }
 
 #fund-display {
@@ -23,11 +43,26 @@
 #fund-select-container {
     display: flex;
     align-items: center;
+    justify-content: center;
 }
 
 #ticker-selector-div{
-    width: 80%;
-    margin: auto;
+    margin-left: 20px;
+    min-width: 100px;
+}
+
+@media (min-width: 576px) {
+    #ticker-selector-div{
+        min-width: 400px;
+        margin-top: 50px;
+    }
+}
+
+#main-options-container {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    justify-content: center;
 }
 
 /*@media (min-width: 576px) {
