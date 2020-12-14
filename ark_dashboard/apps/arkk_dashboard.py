@@ -50,6 +50,8 @@ FUNDS = ['ARKK', 'ARKW', 'ARKQ', 'ARKF', 'ARKG']
 FUND_IDS = ['%s_store' % x for x in FUNDS]
 holdings_store = [dcc.Store(id=x) for x in FUND_IDS]
 
+INITIAL_FUND = "ARKK"
+
 
 
 ##### LAYOUT COMPONENTS #####
@@ -126,33 +128,34 @@ layout = html.Div(children=[
     ),
     html.Div(id="fund-header", children=[
         html.Div(id="fund-display", children=[
-            html.Span("You are viewing the "),
-            html.Span(id="fund-name"),
-            html.Span(" fund")
-        ]),
-        html.Div(className='break'),
-        html.Div(id='fund-select-container', children=[
-            html.Div("Select a new fund: "),
+            html.H1(id="fund-display-prefix", children=["You are viewing the "]),
             dcc.Dropdown(
                 id='fund-dropdown',
                 options=[{'label': x, 'value': x} for x in np.append(FUNDS, 'All')],
-                value="ARKK",
+                value=INITIAL_FUND,
                 searchable=False
-            )
-        ])
+            ),
+            html.H1(id="fund-display-suffix", children=[" fund"])
+        ]),
+        html.Div(className='break'),
     ]),
     dbc.Button("Open modal", id="open-modal"),
     dbc.Modal(
         [
-            dbc.ModalHeader("No stock selected", id="selected-stock-name"),
+            dcc.Loading(
+                dbc.ModalHeader("No stock selected", id="selected-stock-name"),
+                type="circle", color="#8e6cdf"
+            ),
             dcc.Store(id='selected-stock-ticker'),
             dcc.Loading(
-            dcc.Graph(
-                id='historical-data-graph-ark',
-                config={'modeBarButtonsToRemove': 
-                    ['toImage', 'zoomIn2d', 'zoomOut2d', 'hoverClosestCartesian', 'resetScale2d', 'toggleSpikelines', 'hoverCompareCartesian', 'hoverClosestCartesian']
-                }
-            )),
+                dcc.Graph(
+                    id='historical-data-graph-ark',
+                    config={'modeBarButtonsToRemove': 
+                        ['toImage', 'zoomIn2d', 'zoomOut2d', 'hoverClosestCartesian', 'resetScale2d', 'toggleSpikelines', 'hoverCompareCartesian', 'hoverClosestCartesian']
+                    }
+                ),
+                type="cube", color="#8e6cdf"
+            ),
             dbc.ModalBody(id="selected-stock-content"),
             dbc.ModalFooter(
                 dbc.Button("Close", id="close-modal", className="ml-auto")
@@ -172,9 +175,10 @@ layout = html.Div(children=[
                 ticker_selector(pd.DataFrame())
             ])
         ]),
-        dcc.Loading(type="cube", children=[
-            dcc.Graph(id='main-graph')
-        ])
+        dcc.Loading(
+            dcc.Graph(id='main-graph'),
+            type="cube", color="#8e6cdf"
+        )
     ]),
     *holdings_store
 ])
@@ -187,67 +191,146 @@ layout = html.Div(children=[
 # Create daily transactional plots
 def create_daily_transactions_plots(df):
 
+    # Find the unique dates and extrapolate to get the number of subplots needed
+    unique_dates = sorted(df['date'].unique(), reverse=True)[:7]
+    num_plots = min(len(unique_dates), 7)
+
+    # Configure the subplot params based on number of subplots needed
+    sub_rows = 1
+    sub_row_heights = [0.5]
+    sub_specs = [[{"colspan": 2}, None]]
+    for row in row_generator(2, num_plots):
+        sub_rows+=1
+        sub_row_heights.append(0.5)
+        sub_specs.append([{}, {}])
+
+    # Create and configure subplot options
     fig = make_subplots(
-        rows=4, cols=2,
-        subplot_titles=[str(x) for x in range(min(df.shape[0], 7))],
+        rows=sub_rows, cols=2,
+        subplot_titles=[str(x) for x in range(num_plots)],
         column_widths=[0.5, 0.5],
-        row_heights=[0.5, 0.5, 0.5, 0.5],
-        specs=[[{"colspan": 2}, None],
-            [{},             {}],
-            [{},             {}],
-            [{},             {}]]
+        row_heights=sub_row_heights,
+        specs=sub_specs
     )
     fig.update_xaxes(tickangle=45)
     fig.update_layout(height=1000, showlegend=False)
 
-    iternum = 0
-    for date, idx in zip(sorted(df['date'].unique(), reverse=True)[:7], [(1,1), (2,1), (2,2), (3,1), (3,2), (4,1), (4,2)]):
+    # Add each graph to plot
+    subplot_positions = [(1,1), (2,1), (2,2), (3,1), (3,2), (4,1), (4,2)]
+    for iternum, idx in enumerate(range(num_plots)):
+        date = unique_dates[idx]
         temp = df[df['date'] == date]
+        transaction_vol = df['transaction_value'].astype('int64').apply(lambda x: "{:,}".format(x)).values
+        shares = df['shares'].astype('int64').apply(lambda x: "{:,}".format(x)).values
+
         fig.layout.annotations[iternum]['text'] = pd.to_datetime(str(date)).strftime("%A, %b %d")
         fig.add_trace(go.Scatter(
             x=temp['ticker'], 
             y=temp['transaction_value'],
             text=temp['shares'],
+            customdata=np.dstack((transaction_vol, shares))[0],
+            hovertemplate=
+            '<b>Ticker</b>: %{x}'+
+            '<br><b>Dollar Volume</b>: $%{customdata[0]}</br>'+
+            '<b>Shares Volume</b>: %{customdata[1]}'+
+            '<extra></extra>',
             mode='markers', name=str(date)),
-            row=idx[0], col=idx[1]
+            row=subplot_positions[idx][0], col=subplot_positions[idx][1]
         )
-        iternum+=1
+
+        fig.update_yaxes(
+            tickformat="$.2s",
+            row=subplot_positions[idx][0],
+            col=subplot_positions[idx][1]
+        )
+
+    fig.update_layout(
+        title={
+            'text': "Total Transactional Dollar Volume by Day",
+            'x': 0.5,
+            'xanchor': "center"
+        },
+        
+    )
 
     return fig
 
+# Generate a list of rows for generating subplots
+def row_generator(x, lim=np.inf):
+    if x % 2 != 0:
+        raise ValueError("x must be an even value")
+    if x <= 1:
+        yield x
+        x+=1
+    while x <= lim:
+        yield x
+        x+=2
+
 # Create transaction analyzer plot
-def create_transaction_analyzer_plot(df):
+def create_transaction_analyzer_plot(df, start, end):
+
+    start = pd.to_datetime(str(start)).strftime("%A, %b %d")
+    end = pd.to_datetime(str(end)).strftime("%A, %b %d")
+
+    transaction_vol = df['transaction_value'].astype('int64').apply(lambda x: "{:,}".format(x)).values
+    shares = df['shares'].astype('int64').apply(lambda x: "{:,}".format(x)).values
     
     fig = go.Figure(layout={'height': 600})
     fig.add_trace(go.Scatter(
                             x=df['ticker'], 
                             y=df['transaction_value'],
-                            text=df['shares'],
-                            mode='markers', name="All Transactions",
-                            marker=dict(size=10)))
-    fig.update_xaxes(tickangle=45)
-
-    return fig
-
-# Create the current holdings plot
-def create_holdings_graph(df):
-    
-    fig = go.Figure(layout={'height': 600})
-    fig.add_trace(go.Scatter(
-                            x=df['ticker'], 
-                            y=df['weight(%)'],
-                            text=[(x,y) for x,y in zip(df['market value($)'], df['shares'])],
+                            customdata=np.dstack((transaction_vol, shares))[0],
+                            hovertemplate=
+                            '<b>Ticker</b>: %{x}'+
+                            '<br><b>Dollar Volume</b>: $%{customdata[0]}</br>'+
+                            '<b>Shares Volume</b>: %{customdata[1]}'+
+                            '<extra></extra>',
                             mode='markers', name="All Transactions",
                             marker=dict(size=10)))
     fig.update_xaxes(tickangle=45)
     fig.update_layout(
         title={
-            'text': "Holdings",
+            'text': "Total Transactional Dollar Volume Between: %s and %s" % (start, end),
             'x': 0.5,
             'xanchor': "center"
         },
         xaxis_title="Company",
-        yaxis_title="Portfolio Allocation (%)",
+        yaxis_title="Transactional Dollar Volume",
+        yaxis_tickformat="$.2s"
+    )
+
+    return fig
+
+# Create the current holdings plot
+def create_holdings_graph(df):
+
+    date = pd.to_datetime(str(df['date'].unique()[0])).strftime("%A, %b %d")
+    market_value = df['market value($)'].astype('int64').apply(lambda x: "{:,}".format(x)).values
+    shares = df['shares'].astype('int64').apply(lambda x: "{:,}".format(x)).values
+    
+    fig = go.Figure(layout={'height': 600})
+    fig.add_trace(go.Scatter(
+                            x=df['ticker'], 
+                            y=df['weight(%)']/100,
+                            customdata=np.dstack((market_value, shares))[0],
+                            hovertemplate=
+                            '<b>Ticker</b>: %{x}'+
+                            '<br><b>Allocation</b>: %{y:.2p}</br>'+
+                            '<b>Market Value</b>: $%{customdata[0]}'+
+                            '<br><b>Shares Held</b>: %{customdata[1]}</br>'+
+                            '<extra></extra>',
+                            mode='markers', name="All Transactions",
+                            marker=dict(size=10)))
+    fig.update_xaxes(tickangle=45)
+    fig.update_layout(
+        title={
+            'text': "Holdings as of %s" % date,
+            'x': 0.5,
+            'xanchor': "center"
+        },
+        xaxis_title="Company",
+        yaxis_title="Portfolio Allocation",
+        yaxis_tickformat="%"
     )
 
     return fig
@@ -257,16 +340,16 @@ def create_holdings_graph(df):
 
 ##### CALLBACKS #####
 
-# TRIGGER: Fund dropdown is changed
-# OUTPUTS: Updates the displayed fund name
 @app.callback(
-    Output('fund-name', 'children'),
+    [Output('fund-display-prefix', 'children'), Output('fund-display-suffix', 'children')],
     [Input('fund-dropdown', 'value')]
 )
-def change_fund_header(fund):
-    if not fund:
-        return no_update
-    return fund
+def fund_header_reformat(fundname):
+    print(fundname)
+    if fundname == "All":
+        return "You are viewing ", " funds"
+    else:
+        return "You are viewing the ", " fund"
 
 @app.callback(
     [Output(x, 'data') for x in FUND_IDS],
@@ -293,12 +376,18 @@ def update_holdings_data(nclicks):
 
 @app.callback(
     Output('calendars-div', 'children'),
-    [Input('graph-tabs', 'value')]
+    [Input('graph-tabs', 'value'), Input('fund-dropdown', 'value'), *[Input(x, 'data') for x in FUND_IDS]]
 )
-def update_calendar_div(tabname):
+def update_calendar_div(tabname, fundname, *funds):
 
     if tabname == "cur-holdings":
-        return date_range_picker(False), date_picker(True)
+        # Find the most current holdings available
+        if tabname and fundname and funds:
+            df = create_holdings_from_fundname(fundname, *funds)
+            most_recent = max(pd.to_datetime(df['date']))
+        else:
+            most_recent = dt.today()
+        return date_range_picker(False), date_picker(True, most_recent)
     elif tabname == "trans-view":
         return date_range_picker(True), date_picker(False)
     elif tabname == "trans-daily":
@@ -310,7 +399,7 @@ def update_calendar_div(tabname):
 # OUTPUTS: Content of main container / graph
 @app.callback(
     [Output('main-graph', 'figure'), Output('ticker-selector-div', 'children')],
-    [Input('graph-tabs', 'value'), Input('fund-name', 'children'),
+    [Input('graph-tabs', 'value'), Input('fund-dropdown', 'value'),
      Input('date-range-picker', 'start_date'), Input('date-range-picker', 'end_date'), 
      Input('date-picker', 'date'), Input('ticker-selector', 'value'), *[Input(x, 'data') for x in FUND_IDS]]
 )
@@ -361,7 +450,7 @@ def change_graph(tabname, fundname, start, end, curdate, selectorvalues, *funds)
         df = df.reset_index().groupby(['ticker', 'company']).sum().reset_index()
         df = df.sort_values('transaction_value', ascending=False)
 
-        fig = create_transaction_analyzer_plot(df)
+        fig = create_transaction_analyzer_plot(df, start, end)
     # Display transactions for previous 7 trading days
     elif tabname == "trans-daily":
         dates = sorted(df['date'].unique(), reverse=True)[:8]
@@ -421,7 +510,7 @@ def open_stock_analyzer(clickData, modalclicks):
 @app.callback(
     [Output('historical-data-graph-ark', 'figure'), Output('selected-stock-name', 'children')],
     [Input('selected-stock-ticker', 'data')],
-    [State('fund-name', 'children'), State('open-modal', 'n_clicks'), *[State(x, 'data') for x in FUND_IDS]]
+    [State('fund-dropdown', 'value'), State('open-modal', 'n_clicks'), *[State(x, 'data') for x in FUND_IDS]]
 )
 def create_historical_plot(ticker, fundname, modalclicks, *funds):
 
@@ -482,13 +571,16 @@ def create_holdings_from_fundname(fundname, *funds):
 
 ########                                    EVENT OVERLAY ON HISTORICAL DATA                                     ########
 
-def impose_event_on_historical(events, historical_data, initialize_with_zoom=0):
+def impose_event_on_historical(events, historical_data, initialize_with_zoom=0, marker_size_bounds=(6,50)):
 
     # Scale the transaction value to create relative values that will be used for marker sizing in plotting functions
     # TODO: Update this so that bubbles have a minimum size
     transaction_value_abs = events['transaction_value'].abs()
     max_size = transaction_value_abs.max()
-    transaction_value_abs = transaction_value_abs / (max_size/30)
+    normalization_func = np.sqrt
+    factor = marker_size_bounds[1] / normalization_func(max_size)
+    transaction_value_abs = normalization_func(transaction_value_abs) * factor
+    transaction_value_abs.loc[transaction_value_abs < marker_size_bounds[0]] = marker_size_bounds[0]
 
     # Map transaction direction to marker color
     direction_mapper = ['green' if x == 'buy' else 'red' for x in events['direction']]
@@ -547,6 +639,17 @@ def impose_event_on_historical(events, historical_data, initialize_with_zoom=0):
             dict(values=["2020-12-25", "2020-01-01"])  # hide Christmas and New Year's
         ],
         showspikes=True, spikethickness=1, spikecolor='black', spikesnap='cursor', spikemode='across'
+    )
+
+    historical_price_fig.update_layout(
+        title={
+            'text': "Transaction History",
+            'x': 0.5,
+            'xanchor': "center"
+        },
+        xaxis_title="Date",
+        yaxis_title="Stock Price",
+        yaxis_tickformat="$"
     )
 
     # Configure hover options

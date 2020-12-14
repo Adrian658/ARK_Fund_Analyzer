@@ -27,12 +27,15 @@
 }
 
 #fund-display {
-    font-size: 4em;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: center;
 }
 
 #fund-dropdown {
-    width: 10em;
-    margin-left: 20px;
+    min-width: 100px;
+    margin: 0 20px 0 20px;
 }
 
 .break {
@@ -55,6 +58,9 @@
     #ticker-selector-div{
         min-width: 400px;
         margin-top: 50px;
+    }
+    #fund-dropdown {
+        min-width: 8em;
     }
 }
 
